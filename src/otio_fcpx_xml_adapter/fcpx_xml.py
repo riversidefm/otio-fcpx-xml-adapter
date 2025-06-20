@@ -9,6 +9,7 @@ from xml.dom import minidom
 from fractions import Fraction
 from datetime import date
 from urllib.parse import unquote
+from fractions import Fraction
 
 import opentimelineio as otio
 
@@ -26,26 +27,18 @@ FRAMERATE_FRAMEDURATION = {23.98: "1001/24000s",
                            60: "1/60s"}
 
 
-def format_name(frame_rate, path):
+
+def probe_file(path):
     """
-    Helper to get the formatName used in FCP X XML format elements. This
-    uses ffprobe to get the frame size of the the clip at the provided path.
-
-    Args:
-        frame_rate (int): The frame rate of the clip at the provided path
-        path (str): The path to the clip to probe
-
-    Returns:
-        str: The format name. If empty, then ffprobe couldn't find the item
+    Probe a file using ffprobe and return the frame size and frame rate
     """
-
     path = path.replace("file://", "")
     path = unquote(path)
     if not os.path.exists(path):
-        return ""
+        return 0, 0, 0
 
     try:
-        frame_size = subprocess.check_output(
+        frame_info = subprocess.check_output(
             [
                 "ffprobe",
                 "-v",
@@ -53,27 +46,44 @@ def format_name(frame_rate, path):
                 "-select_streams",
                 "v:0",
                 "-show_entries",
-                "stream=height,width",
+                "stream=height,width,r_frame_rate",
                 "-of",
                 "csv=s=x:p=0",
                 path
             ]
         ).decode("utf-8")
-    except (subprocess.CalledProcessError, OSError):
-        frame_size = ""
+    except (subprocess.CalledProcessError, OSError) as e:
+        return 0, 0, 0
 
-    if not frame_size:
-        return ""
+    if not frame_info:
+        return 0, 0, 0
 
-    frame_size = frame_size.rstrip()
+    frame_info = frame_info.strip()
+    frame_info_parts = frame_info.split('x')
 
-    if "1920" in frame_size:
-        frame_size = "1080"
+    if len(frame_info_parts) != 3:
+        return 0, 0, 0
 
-    if frame_size.endswith("1280"):
-        frame_size = "720"
+    width = int(frame_info_parts[0])
+    height = int(frame_info_parts[1])
+    frame_rate = Fraction(frame_info_parts[2])
+    return width, height, frame_rate
 
-    return f"FFVideoFormat{frame_size}p{frame_rate}"
+def format_name(path):
+    """
+    Helper to get the formatName used in FCP X XML format elements. This
+    uses ffprobe to get the frame size of the the clip at the provided path.
+
+    Args:
+        path (str): The path to the clip to probe
+
+    Returns:
+        str: The format name. If empty, then ffprobe couldn't find the item
+    """
+
+    width, height, rate = probe_file(path)
+
+    return f"FFVideoFormat{height}p{int(rate)}", width, height
 
 
 def to_rational_time(rational_number, fps):
@@ -500,17 +510,17 @@ class FcpxOtio:
 
     def _clip_format_name(self, clip):
         if clip.schema_name() in ("Stack", "Track"):
-            return ""
+            return "", 0, 0
         if not clip.media_reference:
-            return ""
+            return "", 0, 0
 
         if clip.media_reference.is_missing_reference:
-            return ""
+            return "", 0, 0
 
-        return format_name(
-            clip.duration().rate,
+        name, width, height = format_name(
             clip.media_reference.target_url
         )
+        return name, width, height
 
     def _find_or_create_format_from(self, clip):
         frame_duration = self._framerate_to_frame_duration(
@@ -518,17 +528,23 @@ class FcpxOtio:
         )
         format_element = self._format_by_frame_rate(clip.duration().rate)
         if format_element is None:
+            name, width, height = self._clip_format_name(clip)
             format_element = cElementTree.SubElement(
                 self.resource_element,
                 "format",
                 {
                     "id": self._resource_id_generator(),
                     "frameDuration": frame_duration,
-                    "name": self._clip_format_name(clip)
+                    "name": name,
+                    "width": str(width),
+                    "height": str(height)
                 }
             )
         if format_element.get("name", "") == "":
-            format_element.set("name", self._clip_format_name(clip))
+            name, width, height = self._clip_format_name(clip)
+            format_element.set("name", name)
+            format_element.set("width", str(width))
+            format_element.set("height", str(height))
         return format_element
 
     def _add_asset(self, clip, compound_only=False):
