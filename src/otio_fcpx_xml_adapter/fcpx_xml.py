@@ -251,10 +251,10 @@ class FcpxOtio:
 
         for idx, track in enumerate(audio_tracks):
             lane_id = -(idx + 1)
-            self._track_for_spine(track, lane_id, spine, compound_clip, len(video_tracks) == 0)
+            self._track_for_spine(track, lane_id, spine, compound_clip)
         return sequence_element
 
-    def _track_for_spine(self, track, lane_id, spine, compound, no_video=False):
+    def _track_for_spine(self, track, lane_id, spine, compound):
         for child in self._lanable_items(track.find_children()):
             if self._item_in_compound_clip(child) and not compound:
                 continue
@@ -263,7 +263,7 @@ class FcpxOtio:
                 lane_id,
                 compound=compound
             )
-            if not lane_id or (lane_id == -1 and no_video):
+            if not lane_id:
                 spine.append(child_element)
                 continue
             if child.schema_name() == "Gap":
