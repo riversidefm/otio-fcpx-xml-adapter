@@ -26,65 +26,126 @@ FRAMERATE_FRAMEDURATION = {23.98: "1001/24000s",
                            59.94: "1001/60000s",
                            60: "1/60s"}
 
+class FFProbe:
+    def __init__(self, path):
+        self._path = path
+        self._width = 0
+        self._height = 0
+        self._frame_rate = 0
+        self._audio_sample_rate = 0
+        self._audio_channels = 0
 
+    def has_video(self):
+        return self._width > 0 and self._height > 0 and self._frame_rate > 0
 
-def probe_file(path):
-    """
-    Probe a file using ffprobe and return the frame size and frame rate
-    """
-    path = path.replace("file://", "")
-    path = unquote(path)
-    if not os.path.exists(path):
-        return 0, 0, 0
+    def has_audio(self):
+        return self._audio_sample_rate > 0 and self._audio_channels > 0
 
-    try:
-        frame_info = subprocess.check_output(
-            [
-                "ffprobe",
-                "-v",
-                "error",
-                "-select_streams",
-                "v:0",
-                "-show_entries",
-                "stream=height,width,r_frame_rate",
-                "-of",
-                "csv=s=x:p=0",
-                path
-            ]
-        ).decode("utf-8")
-    except (subprocess.CalledProcessError, OSError) as e:
-        return 0, 0, 0
+    def is_audio_only(self):
+        return self.has_audio() and not self.has_video()
 
-    if not frame_info:
-        return 0, 0, 0
+    def probe(self):
+        """
+        Probe a file using ffprobe and return the frame size, frame rate, and audio information
+        """
+        path = self._path.replace("file://", "")
+        path = unquote(path)
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"File not found: {path}")
 
-    frame_info = frame_info.strip()
-    frame_info_parts = frame_info.split('x')
+        # Probe video information
+        try:
+            frame_info = subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "v:0",
+                    "-show_entries",
+                    "stream=height,width,r_frame_rate",
+                    "-of",
+                    "csv=s=x:p=0",
+                    path
+                ]
+            ).decode("utf-8")
+        except (subprocess.CalledProcessError, OSError) as e:
+            # Video probe failed, but file might still have audio
+            frame_info = ""
 
-    if len(frame_info_parts) != 3:
-        return 0, 0, 0
+        if frame_info:
+            frame_info = frame_info.strip()
+            frame_info_parts = frame_info.split('x')
 
-    width = int(frame_info_parts[0])
-    height = int(frame_info_parts[1])
-    frame_rate = Fraction(frame_info_parts[2])
-    return width, height, frame_rate
+            if len(frame_info_parts) == 3:
+                self._width = int(frame_info_parts[0])
+                self._height = int(frame_info_parts[1])
+                self._frame_rate = Fraction(frame_info_parts[2])
 
-def format_name(path):
-    """
-    Helper to get the formatName used in FCP X XML format elements. This
-    uses ffprobe to get the frame size of the the clip at the provided path.
+        # Probe audio information
+        try:
+            audio_info = subprocess.check_output(
+                [
+                    "ffprobe",
+                    "-v",
+                    "error",
+                    "-select_streams",
+                    "a:0",
+                    "-show_entries",
+                    "stream=sample_rate,channels",
+                    "-of",
+                    "csv=s=x:p=0",
+                    path
+                ]
+            ).decode("utf-8")
+        except (subprocess.CalledProcessError, OSError) as e:
+            # Audio probe failed
+            audio_info = ""
 
-    Args:
-        path (str): The path to the clip to probe
+        if audio_info:
+            audio_info = audio_info.strip()
+            audio_info_parts = audio_info.split('x')
 
-    Returns:
-        str: The format name. If empty, then ffprobe couldn't find the item
-    """
+            if len(audio_info_parts) == 2:
+                self._audio_sample_rate = int(audio_info_parts[0])
+                self._audio_channels = int(audio_info_parts[1])
 
-    width, height, rate = probe_file(path)
+        # Check that we found at least video or audio
+        if not self.has_video() and not self.has_audio():
+            raise RuntimeError(f"No video or audio information found: {self._path}")
 
-    return f"FFVideoFormat{height}p{int(rate)}", width, height
+    def format_name(self):
+        """
+        Helper to get the formatName used in FCP X XML format elements. This
+        uses ffprobe to get the frame size of the the clip at the provided path.
 
+        Returns:
+            str: The format name. If empty, then ffprobe couldn't find the item
+        """
+        if self.has_video():
+            return f"FFVideoFormat{self._height}p{int(self._frame_rate)}"
+        else:
+            return ""
+
+    @property
+    def width(self):
+        return self._width
+
+    @property
+    def height(self):
+        return self._height
+
+    @property
+    def frame_rate(self):
+        return self._frame_rate
+
+    @property
+    def audio_sample_rate(self):
+        return self._audio_sample_rate
+
+    @property
+    def audio_channels(self):
+        return self._audio_channels
 
 def to_rational_time(rational_number, fps):
     """
@@ -165,6 +226,7 @@ class FcpxOtio:
             self.event_resource = self.fcpx_xml
 
         self.resource_count = 0
+        self._ffprobe_cache = {}
 
     def to_xml(self):
         """
@@ -341,11 +403,11 @@ class FcpxOtio:
             else:
                 asset_id = element.find("./video").get("ref")
             asset = self._asset_by_id(asset_id)
-            format_id = asset.get("format")
+            format_id = asset.get("format", default_format_id)
 
         if element.tag == "asset-clip":
             asset = self._asset_by_id(element.get("ref"))
-            format_id = asset.get("format")
+            format_id = asset.get("format", default_format_id)
 
         format_element = self.resource_element.find(
             f"./format[@id='{format_id}']"
@@ -510,17 +572,26 @@ class FcpxOtio:
 
     def _clip_format_name(self, clip):
         if clip.schema_name() in ("Stack", "Track"):
-            return "", 0, 0
+            return None
         if not clip.media_reference:
-            return "", 0, 0
+            return None
 
         if clip.media_reference.is_missing_reference:
-            return "", 0, 0
+            return None
 
-        name, width, height = format_name(
-            clip.media_reference.target_url
-        )
-        return name, width, height
+        try:
+            if clip.media_reference.target_url in self._ffprobe_cache:
+                return self._ffprobe_cache[clip.media_reference.target_url]
+
+            ffprobe = FFProbe(clip.media_reference.target_url)
+            self._ffprobe_cache[clip.media_reference.target_url] = ffprobe
+            ffprobe.probe()
+            if ffprobe.has_video() or ffprobe.has_audio():
+                return ffprobe
+            else:
+                return None
+        except (RuntimeError, Exception):
+            return None
 
     def _find_or_create_format_from(self, clip):
         frame_duration = self._framerate_to_frame_duration(
@@ -528,7 +599,17 @@ class FcpxOtio:
         )
         format_element = self._format_by_frame_rate(clip.duration().rate)
         if format_element is None:
-            name, width, height = self._clip_format_name(clip)
+            fformat = self._clip_format_name(clip)
+            if fformat and fformat.has_video():
+                name = fformat.format_name()
+                width = fformat.width
+                height = fformat.height
+            else:
+                # Default values when no media data available
+                name = f"FFVideoFormat720p24"
+                width = 1280
+                height = 720
+
             format_element = cElementTree.SubElement(
                 self.resource_element,
                 "format",
@@ -541,10 +622,16 @@ class FcpxOtio:
                 }
             )
         if format_element.get("name", "") == "":
-            name, width, height = self._clip_format_name(clip)
-            format_element.set("name", name)
-            format_element.set("width", str(width))
-            format_element.set("height", str(height))
+            fformat = self._clip_format_name(clip)
+            if fformat:
+                format_element.set("name", fformat.format_name())
+                if fformat.has_video():
+                    format_element.set("width", str(fformat.width))
+                    format_element.set("height", str(fformat.height))
+                else:
+                    # Audio-only file: use default dimensions
+                    format_element.set("width", "1280")
+                    format_element.set("height", "720")
         return format_element
 
     def _add_asset(self, clip, compound_only=False):
@@ -570,15 +657,23 @@ class FcpxOtio:
 
     def _create_asset_clip_element(self, clip, format_element, resource_id):
         duration = self._find_asset_duration(clip)
+
+        # Check if this is an audio-only asset
+        ffprobe = self._clip_format_name(clip)
+        asset_clip_attributes = {
+            "name": clip.name,
+            "ref": resource_id,
+            "duration": duration
+        }
+
+        # Only include format reference for non-audio-only assets
+        if not (ffprobe and ffprobe.is_audio_only()):
+            asset_clip_attributes["format"] = format_element.get("id")
+
         a_clip = cElementTree.SubElement(
             self.event_resource,
             "asset-clip",
-            {
-                "name": clip.name,
-                "format": format_element.get("id"),
-                "ref": resource_id,
-                "duration": duration
-            }
+            asset_clip_attributes
         )
         if (clip.media_reference and not
            clip.media_reference.is_missing_reference):
@@ -604,22 +699,32 @@ class FcpxOtio:
     def _create_asset_element(self, clip, format_element):
         target_url = self._target_url_from_clip(clip)
         asset = self._asset_by_path(target_url)
+        ffprobe = self._clip_format_name(clip)
+
         if asset is not None:
             return asset
+
+        asset_attributes = {
+            "name": clip.name,
+            "src": target_url,
+            "id": self._resource_id_generator(),
+            "duration": self._find_asset_duration(clip),
+            "start": self._find_asset_start(clip),
+            "hasAudio": "0",
+            "hasVideo": "0"
+        }
+
+        if ffprobe and ffprobe.is_audio_only():
+            asset_attributes["audioSources"] = "1"
+            asset_attributes["audioChannels"] = str(ffprobe.audio_channels)
+            asset_attributes["audioRate"] = str(ffprobe.audio_sample_rate)
+        else:
+            asset_attributes["format"] = format_element.get("id")
 
         asset = cElementTree.SubElement(
             self.resource_element,
             "asset",
-            {
-                "name": clip.name,
-                "src": target_url,
-                "format": format_element.get("id"),
-                "id": self._resource_id_generator(),
-                "duration": self._find_asset_duration(clip),
-                "start": self._find_asset_start(clip),
-                "hasAudio": "0",
-                "hasVideo": "0"
-            }
+            asset_attributes
         )
         return asset
 

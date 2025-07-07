@@ -8,7 +8,7 @@ import unittest
 import unittest.mock
 import opentimelineio as otio
 import opentimelineio.test_utils as otio_test_utils
-from otio_fcpx_xml_adapter.fcpx_xml import format_name
+from otio_fcpx_xml_adapter.fcpx_xml import FFProbe
 
 
 SAMPLE_LIBRARY_XML = os.path.join(
@@ -161,15 +161,45 @@ class AdaptersFcpXXmlTest(unittest.TestCase, otio_test_utils.OTIOAssertions):
 
     def test_format_name(self):
         rvalue = subprocess.check_output(
-            [sys.executable, '-c', 'print("640x360")']
+            [sys.executable, '-c', 'print("640x360x25/1")']
         )
         mock_patch = unittest.mock.patch.object
         with mock_patch(subprocess, 'check_output', return_value=rvalue):
             with mock_patch(os.path, 'exists', return_value=True):
+                ffprobe = FFProbe("file:///dummy.me")
+                ffprobe.probe()
                 self.assertEqual(
-                    format_name(25, "file:///dummy.me"),
-                    'FFVideoFormat640x360p25'
+                    ffprobe.format_name(),
+                    'FFVideoFormat360p25'
                 )
+
+    def test_audio_only_format(self):
+        """Test audio-only file handling."""
+        # Mock ffprobe responses: first call (video) fails, second call (audio) succeeds
+        def mock_check_output(*args, **kwargs):
+            command = args[0]
+            if "v:0" in command:
+                # Video probe - raise exception (no video stream)
+                raise subprocess.CalledProcessError(1, command)
+            elif "a:0" in command:
+                # Audio probe - return sample rate and channels
+                return b"48000x2\n"
+            else:
+                raise subprocess.CalledProcessError(1, command)
+
+        mock_patch = unittest.mock.patch.object
+        with mock_patch(subprocess, 'check_output', side_effect=mock_check_output):
+            with mock_patch(os.path, 'exists', return_value=True):
+                ffprobe = FFProbe("file:///dummy.wav")
+                ffprobe.probe()
+
+                # Check audio properties
+                self.assertTrue(ffprobe.has_audio())
+                self.assertFalse(ffprobe.has_video())
+                self.assertTrue(ffprobe.is_audio_only())
+                self.assertEqual(ffprobe.audio_sample_rate, 48000)
+                self.assertEqual(ffprobe.audio_channels, 2)
+
 
 
 if __name__ == '__main__':
