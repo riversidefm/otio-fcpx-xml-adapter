@@ -797,6 +797,8 @@ class FcpxOtio:
         frame_duration = FRAMERATE_FRAMEDURATION.get(int(framerate), "")
         if not frame_duration:
             frame_duration = FRAMERATE_FRAMEDURATION.get(float(framerate), "")
+        if not frame_duration:
+            frame_duration = FRAMERATE_FRAMEDURATION.get(24)
         return frame_duration
 
     @staticmethod
