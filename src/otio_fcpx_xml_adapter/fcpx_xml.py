@@ -662,9 +662,9 @@ class FcpxOtio:
             # Use the new conditional ffprobe function
             file_path = clip.media_reference.target_url.replace("file://", "")
             file_path = unquote(file_path)
-            
+
             media_info = _get_media_info_with_ffprobe(file_path, self.use_otio_ffprobe)
-            
+
             if media_info is not None:
                 self._ffprobe_cache[clip.media_reference.target_url] = media_info
                 return media_info
@@ -747,7 +747,7 @@ class FcpxOtio:
         }
 
         # Only include format reference for non-audio-only assets
-        if not (ffprobe and ffprobe.is_audio_only()):
+        if not (ffprobe and ffprobe.is_audio_only):
             asset_clip_attributes["format"] = format_element.get("id")
 
         a_clip = cElementTree.SubElement(
@@ -794,7 +794,7 @@ class FcpxOtio:
             "hasVideo": "0"
         }
 
-        if ffprobe and ffprobe.is_audio_only():
+        if ffprobe and ffprobe.is_audio_only:
             asset_attributes["audioSources"] = "1"
             asset_attributes["audioChannels"] = str(ffprobe.audio_channels)
             asset_attributes["audioRate"] = str(ffprobe.audio_sample_rate)
