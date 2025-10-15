@@ -10,10 +10,23 @@ from fractions import Fraction
 from datetime import date
 from urllib.parse import unquote
 from fractions import Fraction
+from collections import namedtuple
 
 import opentimelineio as otio
+from opentimelineio.adapters import Adapter
 
 META_NAMESPACE = "fcpx_xml"
+
+# Simple media info container
+MediaInfo = namedtuple('MediaInfo', ['width', 'height', 'frame_rate', 'audio_sample_rate', 'audio_channels', 'is_audio_only'])
+
+# Add methods to MediaInfo
+def _format_name(self):
+    if self.width > 0 and self.height > 0 and self.frame_rate > 0:
+        return f"FFVideoFormat{self.height}p{int(self.frame_rate)}"
+    return ""
+
+MediaInfo.format_name = _format_name
 
 COMPOSABLE_ELEMENTS = ("video", "audio", "ref-clip", "asset-clip")
 
@@ -147,6 +160,68 @@ class FFProbe:
     def audio_channels(self):
         return self._audio_channels
 
+
+# Helper functions to conditionally use OTIO ffprobe or legacy FFProbe class
+def _get_media_info_with_ffprobe(file_path, use_otio_ffprobe=False):
+    """
+    Get media information using either OTIO ffprobe utilities or legacy FFProbe class.
+
+    Args:
+        file_path (str): Path to the media file
+        use_otio_ffprobe (bool): If True, use OTIO's ffprobe utilities. If False, use legacy FFProbe class.
+
+    Returns:
+        MediaInfo: Media information object, or None if no media info could be obtained
+    """
+
+    if use_otio_ffprobe:
+        try:
+            # Use new OTIO ffprobe utilities via Adapter static methods
+            width = Adapter.ffprobe_get_width(file_path)
+            height = Adapter.ffprobe_get_height(file_path)
+            frame_rate = Adapter.ffprobe_get_framerate(file_path)
+            sample_rate = Adapter.ffprobe_get_samplerate(file_path)
+            channels = Adapter.ffprobe_get_channels(file_path)
+
+            has_video = width is not None and height is not None and frame_rate is not None
+            has_audio = sample_rate is not None and channels is not None
+
+            if has_video or has_audio:
+                return MediaInfo(
+                    width=width or 0,
+                    height=height or 0,
+                    frame_rate=frame_rate or 0,
+                    audio_sample_rate=sample_rate or 0,
+                    audio_channels=channels or 0,
+                    is_audio_only=has_audio and not has_video
+                )
+
+        except Exception:
+            # Fall back to legacy method if OTIO ffprobe fails
+            return _get_media_info_with_ffprobe(file_path, use_otio_ffprobe=False)
+    else:
+        # Use legacy FFProbe class
+        try:
+            ffprobe = FFProbe(file_path)
+            ffprobe.probe()
+
+            if ffprobe.has_video() or ffprobe.has_audio():
+                return MediaInfo(
+                    width=ffprobe.width,
+                    height=ffprobe.height,
+                    frame_rate=float(ffprobe.frame_rate) if ffprobe.frame_rate else 0,
+                    audio_sample_rate=ffprobe.audio_sample_rate,
+                    audio_channels=ffprobe.audio_channels,
+                    is_audio_only=ffprobe.is_audio_only()
+                )
+
+        except Exception:
+            # If both methods fail, return None
+            pass
+
+    return None
+
+
 def to_rational_time(rational_number, fps):
     """
     This converts a rational number value to an otio RationalTime object
@@ -200,8 +275,9 @@ class FcpxOtio:
     FCP X XML
     """
 
-    def __init__(self, otio_timeline):
+    def __init__(self, otio_timeline, use_otio_ffprobe=False):
         self.otio_timeline = otio_timeline
+        self.use_otio_ffprobe = use_otio_ffprobe
         self.fcpx_xml = cElementTree.Element("fcpxml", version="1.8")
         self.resource_element = cElementTree.SubElement(
             self.fcpx_xml,
@@ -583,11 +659,15 @@ class FcpxOtio:
             if clip.media_reference.target_url in self._ffprobe_cache:
                 return self._ffprobe_cache[clip.media_reference.target_url]
 
-            ffprobe = FFProbe(clip.media_reference.target_url)
-            self._ffprobe_cache[clip.media_reference.target_url] = ffprobe
-            ffprobe.probe()
-            if ffprobe.has_video() or ffprobe.has_audio():
-                return ffprobe
+            # Use the new conditional ffprobe function
+            file_path = clip.media_reference.target_url.replace("file://", "")
+            file_path = unquote(file_path)
+            
+            media_info = _get_media_info_with_ffprobe(file_path, self.use_otio_ffprobe)
+            
+            if media_info is not None:
+                self._ffprobe_cache[clip.media_reference.target_url] = media_info
+                return media_info
             else:
                 return None
         except (RuntimeError, Exception):
@@ -1267,15 +1347,15 @@ def read_from_string(input_str):
     return FcpxXml(input_str).to_otio()
 
 
-def write_to_string(input_otio):
+def write_to_string(input_otio, use_otio_ffprobe=False):
     """
     Necessary write method for otio adapter
 
     Args:
         input_otio (OpenTimeline): An OpenTimeline object
+        use_otio_ffprobe (bool): If True, use OTIO's ffprobe utilities. If False, use legacy FFProbe class.
 
     Returns:
         str: The string contents of an FCP X XML
     """
-
-    return FcpxOtio(input_otio).to_xml()
+    return FcpxOtio(input_otio, use_otio_ffprobe).to_xml()
